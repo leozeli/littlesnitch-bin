@@ -1,0 +1,59 @@
+name: Check for updates
+
+on:
+  schedule:
+    - cron: '17 3 * * *'  # Daily at 03:17 UTC
+  workflow_dispatch:       # Manual trigger
+
+jobs:
+  check-update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect new version
+        id: detect
+        run: |
+          chmod +x update.sh
+          ./update.sh
+
+      - name: Generate .SRCINFO in Arch container
+        if: steps.detect.outputs.UPDATE_VERSION
+        run: |
+          docker run --rm -v "$PWD":/pkg -w /pkg archlinux:latest bash -c '
+            pacman -Sy --noconfirm pacman-contrib base-devel
+            useradd -m builder
+            chown -R builder:builder /pkg
+            su builder -c "makepkg --printsrcinfo > .SRCINFO"
+          '
+
+      - name: Push to AUR
+        if: steps.detect.outputs.UPDATE_VERSION
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          UPDATE_VERSION: ${{ steps.detect.outputs.UPDATE_VERSION }}
+        run: |
+          # Setup SSH
+          mkdir -p ~/.ssh
+          echo "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+          echo -e "Host aur.archlinux.org\n  IdentityFile ~/.ssh/aur\n  User aur" >> ~/.ssh/config
+
+          # Clone AUR repo and update
+          git clone ssh://aur@aur.archlinux.org/littlesnitch-bin.git /tmp/aur-pkg
+          cp PKGBUILD littlesnitch.install .SRCINFO /tmp/aur-pkg/
+          cd /tmp/aur-pkg
+
+          git config user.name "leozeli"
+          git config user.email "41317927+leozeli@users.noreply.github.com"
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update to $UPDATE_VERSION"
+            git push
+            echo "Pushed $UPDATE_VERSION to AUR"
+          fi
